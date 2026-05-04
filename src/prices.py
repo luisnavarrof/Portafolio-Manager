@@ -80,6 +80,40 @@ def fetch_prices(tickers: list[str], start: str | datetime, end: str | datetime 
     return wide
 
 
+def live_quotes(tickers: list[str]) -> dict[str, float]:
+    """Cotizaciones intradía (último minuto disponible) vía yfinance.
+
+    Devuelve {ticker_fintual: last_price}. Si falla un ticker, se omite del dict.
+    """
+    if not tickers:
+        return {}
+    syms = [yf_symbol(t) for t in tickers]
+    sym_to_t = dict(zip(syms, tickers))
+    out: dict[str, float] = {}
+    try:
+        data = yf.download(
+            syms, period="1d", interval="1m",
+            progress=False, auto_adjust=False, threads=True,
+        )
+    except Exception as ex:
+        print(f"[live_quotes] error batch: {ex}")
+        return {}
+    if data is None or data.empty:
+        return {}
+    if isinstance(data.columns, pd.MultiIndex):
+        close = data["Close"]
+        last = close.ffill().iloc[-1]
+        for sym, val in last.items():
+            if pd.notna(val):
+                out[sym_to_t[sym]] = float(val)
+    else:
+        # un solo ticker: columnas planas
+        s = data["Close"].dropna()
+        if not s.empty:
+            out[sym_to_t[syms[0]]] = float(s.iloc[-1])
+    return out
+
+
 def price_on(ticker: str, date: pd.Timestamp, prices: pd.DataFrame | None = None) -> float | None:
     """Precio en `date` (o el último previo disponible)."""
     if prices is None or ticker not in prices.columns:

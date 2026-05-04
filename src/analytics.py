@@ -76,14 +76,21 @@ def drawdown(value_series: pd.Series) -> pd.Series:
     return (value_series - peak) / peak
 
 
-def per_ticker_summary(states_dict, prices: pd.DataFrame, fx_rate: float = 1.0) -> pd.DataFrame:
-    """Resumen por ticker incluyendo histórico (rendimiento absoluto y %)."""
+def per_ticker_summary(states_dict, prices: pd.DataFrame, fx_rate: float = 1.0,
+                       live: dict[str, float] | None = None) -> pd.DataFrame:
+    """Resumen por ticker incluyendo histórico (rendimiento absoluto y %).
+
+    Si `live` está disponible (dict ticker→precio), usa la cotización intradía
+    en lugar del último cierre.
+    """
     rows = []
     today = pd.Timestamp.today().normalize()
     for t, st in states_dict.items():
         if st.shares <= 1e-6:
             continue
-        last_px = price_on(t, today, prices)
+        last_px = (live or {}).get(t)
+        if last_px is None:
+            last_px = price_on(t, today, prices)
         if last_px is None:
             continue
         mv = st.shares * last_px

@@ -4,13 +4,14 @@ Run:
     streamlit run app.py
 """
 from __future__ import annotations
+from datetime import date
 import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
 import plotly.express as px
 
-from src.loader import load_transactions, stock_tickers, TX_PATH
-from src.prices import fetch_prices, price_on
+from src.loader import load_transactions, stock_tickers, TX_PATH, CASH_ASSET
+from src.prices import fetch_prices, price_on, live_quotes
 from src.fx import fetch_fx, latest_rate
 from src.portfolio import (
     build_states, closed_positions,
@@ -18,6 +19,14 @@ from src.portfolio import (
 )
 from src.analytics import cash_flows, benchmark_voo, drawdown, per_ticker_summary
 from src.logos import logo_urls
+from src.storage import save_transactions
+
+try:
+    from streamlit_autorefresh import st_autorefresh
+    _HAS_AUTOREFRESH = True
+except ImportError:
+    _HAS_AUTOREFRESH = False
+
 
 st.set_page_config(
     page_title="Portafolio-Manager",
@@ -31,7 +40,6 @@ st.set_page_config(
 st.markdown(
     """
     <style>
-    /* Ocultar toolbar superior de Streamlit (Deploy / hamburguesa) y status */
     header[data-testid="stHeader"] {display: none !important;}
     div[data-testid="stToolbar"] {display: none !important;}
     div[data-testid="stDecoration"] {display: none !important;}
@@ -39,29 +47,25 @@ st.markdown(
     #MainMenu {display: none !important;}
     footer {display: none !important;}
 
-    /* Contenedor principal: padding-top suficiente para que nada quede tapado */
     .block-container {
         padding-top: 1.8rem !important;
         padding-bottom: 2rem !important;
         max-width: 1400px;
     }
 
-    /* Ocultar sidebar y su botón colapsador */
     section[data-testid="stSidebar"] {display: none !important;}
     div[data-testid="collapsedControl"] {display: none !important;}
 
-    /* Tipografía compacta */
     h1 {font-size: 1.7rem !important; margin: 0 !important; padding: 0 !important; line-height: 1.2 !important;}
     h2 {font-size: 1.2rem !important; margin-top: 0.5rem !important;}
     h3 {font-size: 1.05rem !important;}
 
-    /* Métricas: tarjetas uniformes */
     [data-testid="stMetric"] {
         background: rgba(127,127,127,0.06);
         border: 1px solid rgba(127,127,127,0.18);
         border-radius: 10px;
         padding: 14px 16px;
-        min-height: 108px;          /* todas las tarjetas con la misma altura */
+        min-height: 108px;
         display: flex;
         flex-direction: column;
         justify-content: center;
@@ -84,24 +88,41 @@ st.markdown(
     }
     [data-testid="stMetricDelta"] {
         font-size: 0.82rem !important;
-        min-height: 1.2em;          /* reserva espacio aun cuando no hay delta */
+        min-height: 1.2em;
     }
 
-    /* Tabs más limpias */
     .stTabs [data-baseweb="tab-list"] {gap: 4px;}
     .stTabs [data-baseweb="tab"] {
         padding: 8px 18px;
         font-weight: 500;
     }
 
-    /* Espaciado de gráficos */
     [data-testid="stPlotlyChart"] {margin-top: -0.3rem;}
 
-    /* Botones en la fila de header con altura consistente */
     .stButton > button {
         height: 38px;
         border-radius: 8px;
     }
+
+    /* Indicador "Live" del refresh */
+    .live-badge {
+        display: inline-block;
+        background: #1f7a3d;
+        color: #d4f5dd;
+        padding: 2px 8px;
+        border-radius: 999px;
+        font-size: 0.72rem;
+        font-weight: 600;
+        letter-spacing: 0.02em;
+        margin-left: 6px;
+    }
+    .live-badge .dot {
+        display: inline-block; width: 7px; height: 7px;
+        background: #4ade80; border-radius: 50%;
+        margin-right: 5px; vertical-align: middle;
+        animation: pulse 1.4s ease-in-out infinite;
+    }
+    @keyframes pulse {0%,100%{opacity:1;}50%{opacity:0.35;}}
     </style>
     """,
     unsafe_allow_html=True,
@@ -109,7 +130,7 @@ st.markdown(
 
 
 # ──────────────── Cache helpers ────────────────
-@st.cache_data(ttl=900, show_spinner="Cargando transacciones…")
+@st.cache_data(ttl=60, show_spinner="Cargando transacciones…")
 def _load_tx():
     return load_transactions()
 
@@ -129,6 +150,29 @@ def _logos(tickers):
     return logo_urls(list(tickers))
 
 
+@st.cache_data(ttl=60, show_spinner=False)
+def _live(tickers, _bucket):
+    """Cotizaciones intradía. `_bucket` invalida la cache cada N segundos."""
+    return live_quotes(list(tickers))
+
+
+def _gh_secrets() -> dict | None:
+    try:
+        gh = st.secrets.get("github", None)
+        if gh and gh.get("token") and gh.get("repo"):
+            return dict(gh)
+    except (FileNotFoundError, KeyError, AttributeError):
+        pass
+    return None
+
+
+# ──────────────── Estado de UI ────────────────
+if "live_enabled" not in st.session_state:
+    st.session_state.live_enabled = True
+if "live_interval" not in st.session_state:
+    st.session_state.live_interval = 60
+
+
 # ──────────────── Carga ────────────────
 tx = _load_tx()
 tickers = stock_tickers(tx)
@@ -140,7 +184,18 @@ fx_rate = latest_rate(fx)
 states = build_states(tx, prices)
 logos = _logos(tickers)
 
-ph = per_ticker_summary(states, prices, fx_rate=fx_rate)
+# Live quotes (solo posiciones abiertas, ahorra tiempo)
+open_tickers = [t for t, s in states.items() if s.shares > 1e-6]
+live = {}
+if st.session_state.live_enabled and open_tickers:
+    bucket = int(pd.Timestamp.now().timestamp() // st.session_state.live_interval)
+    try:
+        live = _live(tuple(sorted(open_tickers)), bucket)
+    except Exception as ex:
+        live = {}
+        st.warning(f"Live quotes no disponibles: {ex}")
+
+ph = per_ticker_summary(states, prices, fx_rate=fx_rate, live=live)
 total_mv_usd = ph["market_value_usd"].sum() if not ph.empty else 0
 total_cost_usd = ph["cost_basis_usd"].sum() if not ph.empty else 0
 total_unreal = ph["unrealized_usd"].sum() if not ph.empty else 0
@@ -151,49 +206,60 @@ divs_total = sum(s.dividends_usd for s in states.values())
 
 
 # ──────────────── Header ────────────────
-hdr_l, hdr_r = st.columns([0.72, 0.28])
+hdr_l, hdr_r = st.columns([0.62, 0.38])
 with hdr_l:
-    st.title("📈 Portafolio-Manager")
+    badge = ('<span class="live-badge"><span class="dot"></span>LIVE</span>'
+             if st.session_state.live_enabled and live else "")
+    st.markdown(f"# 📈 Portafolio-Manager{badge}", unsafe_allow_html=True)
     st.caption(
         f"Fuente: `{TX_PATH.name}` · "
         f"USD/CLP: **${fx_rate:,.2f}** · "
-        f"Última actualización: {pd.Timestamp.now():%Y-%m-%d %H:%M}"
+        f"Última actualización: {pd.Timestamp.now():%Y-%m-%d %H:%M:%S}"
     )
 with hdr_r:
-    ctrl_l, ctrl_r = st.columns([0.55, 0.45])
-    with ctrl_l:
-        show_clp = st.toggle("Mostrar CLP", value=True)
-    with ctrl_r:
-        if st.button("🔄 Refrescar", use_container_width=True):
+    c1, c2, c3, c4 = st.columns([0.28, 0.32, 0.20, 0.20])
+    with c1:
+        st.session_state.live_enabled = st.toggle(
+            "🔴 Live", value=st.session_state.live_enabled,
+            help="Refresca precios intradía cada N segundos",
+        )
+    with c2:
+        st.session_state.live_interval = st.selectbox(
+            "Intervalo", [30, 60, 120, 300],
+            index=[30, 60, 120, 300].index(st.session_state.live_interval),
+            format_func=lambda s: f"{s}s" if s < 60 else f"{s//60}min",
+            label_visibility="collapsed",
+        )
+    with c3:
+        show_clp = st.toggle("CLP", value=True)
+    with c4:
+        if st.button("🔄", help="Forzar refresh completo", use_container_width=True):
             st.cache_data.clear()
             st.rerun()
 
-st.markdown("")  # pequeño respiro
+# Auto-refresh JS
+if _HAS_AUTOREFRESH and st.session_state.live_enabled:
+    st_autorefresh(interval=st.session_state.live_interval * 1000, key="live_refresh")
+
+st.markdown("")
 
 # ──────────────── KPIs ────────────────
 unreal_pct = (total_unreal / total_cost_usd * 100) if total_cost_usd else 0
 total_pnl = total_unreal + realized + divs_total
 
 k1, k2, k3, k4, k5, k6 = st.columns(6)
-k1.metric(
-    "Valor de mercado",
-    f"US$ {total_mv_usd:,.2f}",
-    f"CLP $ {total_mv_usd * fx_rate:,.0f}" if show_clp else None,
-)
+k1.metric("Valor de mercado", f"US$ {total_mv_usd:,.2f}",
+          f"CLP $ {total_mv_usd * fx_rate:,.0f}" if show_clp else None)
 k2.metric("Costo invertido", f"US$ {total_cost_usd:,.2f}")
-k3.metric(
-    "Unrealized P&L",
-    f"US$ {total_unreal:+,.2f}",
-    f"{unreal_pct:+.2f}%",
-)
+k3.metric("Unrealized P&L", f"US$ {total_unreal:+,.2f}", f"{unreal_pct:+.2f}%")
 k4.metric("Realized P&L", f"US$ {realized:+,.2f}")
 k5.metric("Dividendos", f"US$ {divs_total:,.2f}")
 k6.metric("P&L total", f"US$ {total_pnl:+,.2f}")
 
 
 # ──────────────── Tabs ────────────────
-tab_overview, tab_positions, tab_history, tab_benchmark, tab_closed = st.tabs(
-    ["Overview", "Posiciones", "Histórico", "vs VOO", "Cerradas"]
+tab_overview, tab_positions, tab_history, tab_benchmark, tab_closed, tab_manage = st.tabs(
+    ["Overview", "Posiciones", "Histórico", "vs VOO", "Cerradas", "⚙️ Gestionar"]
 )
 
 
@@ -207,7 +273,7 @@ PLOT_LAYOUT = dict(
     margin=dict(l=10, r=10, t=40, b=10),
     plot_bgcolor="rgba(0,0,0,0)",
     paper_bgcolor="rgba(0,0,0,0)",
-    font=dict(size=12),
+    font=dict(size=12, color="#e6edf3"),
 )
 
 
@@ -216,24 +282,57 @@ with tab_overview:
     if ph.empty:
         st.warning("No hay posiciones abiertas.")
     else:
-        col_a, col_b = st.columns([1.15, 1])
-        with col_a:
-            fig = px.pie(
-                ph, names="ticker", values="market_value_usd",
-                hole=0.55,
+        col_pie, col_tbl = st.columns([1.05, 1])
+
+        with col_pie:
+            st.markdown("**Distribución por ticker**")
+            ph_sorted = ph.sort_values("market_value_usd", ascending=False).copy()
+
+            # Etiquetas: solo en slices >= 4% (las pequeñas se ven en el legend / hover)
+            total = ph_sorted["market_value_usd"].sum()
+            ph_sorted["pct"] = ph_sorted["market_value_usd"] / total * 100
+            ph_sorted["text"] = ph_sorted.apply(
+                lambda r: f"{r['ticker']}<br>{r['pct']:.1f}%" if r["pct"] >= 4 else "",
+                axis=1,
             )
-            fig.update_traces(
-                textinfo="label+percent",
-                textposition="outside",
+
+            fig = go.Figure(go.Pie(
+                labels=ph_sorted["ticker"],
+                values=ph_sorted["market_value_usd"],
+                hole=0.55,
+                text=ph_sorted["text"],
+                textinfo="text",
+                textposition="inside",
+                insidetextorientation="horizontal",
+                hovertemplate="<b>%{label}</b><br>$ %{value:,.2f} · %{percent}<extra></extra>",
                 marker=dict(line=dict(color="rgba(0,0,0,0)", width=0)),
+                sort=False,
+                direction="clockwise",
+            ))
+            # Anotación central con totals
+            fig.add_annotation(
+                text=f"<b>US$ {total:,.0f}</b><br><span style='font-size:11px;opacity:0.7'>{len(ph_sorted)} posiciones</span>",
+                showarrow=False, font=dict(size=16, color="#e6edf3"),
+                x=0.5, y=0.5, xanchor="center", yanchor="middle",
             )
             fig.update_layout(
-                title=dict(text="Distribución por ticker", x=0.0, font=dict(size=14)),
-                height=480, showlegend=False, **PLOT_LAYOUT,
+                showlegend=True,
+                legend=dict(
+                    orientation="v", yanchor="middle", y=0.5,
+                    xanchor="left", x=1.02,
+                    font=dict(size=11),
+                    itemsizing="constant",
+                ),
+                height=520,
+                margin=dict(l=10, r=120, t=10, b=10),
+                plot_bgcolor="rgba(0,0,0,0)",
+                paper_bgcolor="rgba(0,0,0,0)",
+                font=dict(color="#e6edf3"),
+                uniformtext_minsize=10, uniformtext_mode="hide",
             )
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
-        with col_b:
+        with col_tbl:
             st.markdown("**Top posiciones**")
             mini = _with_logo(
                 ph[["ticker", "market_value_usd", "unrealized_pct"]].copy(),
@@ -241,7 +340,7 @@ with tab_overview:
             )
             mini.columns = ["logo", "Ticker", "MV (USD)", "%"]
             st.dataframe(
-                mini, hide_index=True, use_container_width=True, height=480,
+                mini, hide_index=True, use_container_width=True, height=520,
                 column_config={
                     "logo": st.column_config.ImageColumn("", width="small"),
                     "Ticker": st.column_config.TextColumn("Ticker", width="small"),
@@ -294,7 +393,6 @@ with tab_history:
         cum_invested = flows_daily.cumsum()
         dd = drawdown(mv)
 
-        # Resumen rápido
         s1, s2, s3 = st.columns(3)
         s1.metric("NAV actual", f"US$ {mv.iloc[-1]:,.2f}")
         s2.metric("Capital aportado", f"US$ {cum_invested.iloc[-1]:,.2f}")
@@ -332,13 +430,12 @@ with tab_history:
             )
             st.plotly_chart(fig2, use_container_width=True)
 
-        # Contribución por ticker
         if not sh.empty:
             today_sh = sh.iloc[-1]
             contrib = []
             for t in today_sh.index:
                 if today_sh[t] > 1e-6 and t in prices.columns:
-                    p = price_on(t, sh.index[-1], prices)
+                    p = live.get(t) or price_on(t, sh.index[-1], prices)
                     if p:
                         contrib.append({"ticker": t, "mv": today_sh[t] * p})
             if contrib:
@@ -417,16 +514,22 @@ with tab_closed:
     if cp.empty:
         st.info("No hay posiciones cerradas todavía.")
     else:
-        best = cp.iloc[0]
-        worst = cp.iloc[-1]
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Mejor trade",
-                  f"{best['ticker']}",
-                  f"$ {best['realized_pnl']:+,.2f} · {best['realized_pnl_pct']:+.1f}%")
-        c2.metric("Peor trade",
-                  f"{worst['ticker']}",
-                  f"$ {worst['realized_pnl']:+,.2f} · {worst['realized_pnl_pct']:+.1f}%")
-        c3.metric("# posiciones cerradas", f"{len(cp)}")
+        # Best/worst por valor absoluto
+        cp_by_usd = cp.sort_values("realized_pnl", ascending=False)
+        best_usd = cp_by_usd.iloc[0]
+        worst_usd = cp_by_usd.iloc[-1]
+        # Best por porcentaje
+        cp_by_pct = cp.sort_values("realized_pnl_pct", ascending=False)
+        best_pct = cp_by_pct.iloc[0]
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Mejor trade (USD)", best_usd["ticker"],
+                  f"$ {best_usd['realized_pnl']:+,.2f} · {best_usd['realized_pnl_pct']:+.1f}%")
+        c2.metric("Mejor trade (%)", best_pct["ticker"],
+                  f"$ {best_pct['realized_pnl']:+,.2f} · {best_pct['realized_pnl_pct']:+.1f}%")
+        c3.metric("Peor trade (USD)", worst_usd["ticker"],
+                  f"$ {worst_usd['realized_pnl']:+,.2f} · {worst_usd['realized_pnl_pct']:+.1f}%")
+        c4.metric("# posiciones cerradas", f"{len(cp)}")
 
         df_cp = _with_logo(cp, logos)
         st.dataframe(
@@ -443,10 +546,143 @@ with tab_closed:
         )
 
 
+# ─── Gestionar transacciones ───
+with tab_manage:
+    gh = _gh_secrets()
+    if gh:
+        st.success(
+            f"🔗 Sincronización GitHub activa → `{gh['repo']}@{gh.get('branch','main')}`. "
+            "Los cambios se commitean al repo y la app se redespliega automáticamente."
+        )
+    else:
+        st.info(
+            "💾 Modo local: los cambios se guardan en `data/transactions.xlsx` pero **no persisten** "
+            "en Streamlit Cloud entre reinicios. Configura los secrets de GitHub para sync — "
+            "ver instrucciones al final de esta tab."
+        )
+
+    st.markdown("### ➕ Agregar transacción")
+    with st.form("add_tx_form", clear_on_submit=True):
+        c1, c2, c3, c4 = st.columns([1, 1, 1, 1])
+        f_fecha = c1.date_input("Fecha", value=date.today())
+        f_tipo = c2.selectbox("Tipo", ["Compra", "Venta", "Dividendo", "Ganancia", "Compensación"])
+        existing_assets = sorted(set(tx["activo"].unique().tolist() + [CASH_ASSET]))
+        f_activo_pick = c3.selectbox("Activo", existing_assets + ["⊕ Nuevo ticker…"])
+        f_activo_new = c3.text_input("Nuevo ticker", placeholder="ej. AAPL",
+                                      label_visibility="collapsed",
+                                      disabled=(f_activo_pick != "⊕ Nuevo ticker…"))
+        f_monto = c4.number_input("Monto (USD)", min_value=0.0, step=0.01, format="%.2f")
+        c5, c6 = st.columns([1, 3])
+        f_cierre = c5.checkbox("Cierre de posición", value=False,
+                                help="Marca esta venta como cierre completo de la posición.")
+        f_etiqueta = c6.text_input("Etiqueta (opcional)",
+                                    value="Cierre de posición" if False else "")
+        submitted = st.form_submit_button("Guardar transacción", type="primary")
+
+        if submitted:
+            activo = f_activo_new.strip().upper() if f_activo_pick == "⊕ Nuevo ticker…" else f_activo_pick
+            if not activo:
+                st.error("Activo vacío.")
+            elif f_monto <= 0:
+                st.error("Monto debe ser > 0.")
+            else:
+                etiqueta = "Cierre de posición" if f_cierre else (f_etiqueta or "")
+                new_row = pd.DataFrame([{
+                    "fecha": pd.Timestamp(f_fecha),
+                    "tipo": f_tipo,
+                    "activo": activo,
+                    "monto_usd": float(f_monto),
+                    "etiqueta": etiqueta,
+                    "is_close": bool(f_cierre or "Cierre" in etiqueta),
+                }])
+                tx_new = pd.concat([tx, new_row], ignore_index=True)
+                tx_new = tx_new.sort_values(["fecha", "tipo"], kind="stable").reset_index(drop=True)
+                ok, msg = save_transactions(
+                    tx_new, gh_secrets=gh,
+                    message=f"Add tx: {f_tipo} {activo} ${f_monto:.2f} ({f_fecha})",
+                )
+                if ok:
+                    st.success(f"✅ {msg}")
+                    st.cache_data.clear()
+                    st.rerun()
+                else:
+                    st.error(f"❌ {msg}")
+
+    st.divider()
+    st.markdown("### ✏️ Editar / eliminar transacciones existentes")
+    st.caption("Edita celdas o elimina filas (botón 🗑️ a la izquierda). Click 'Guardar cambios' al terminar.")
+
+    edit_df = tx[["fecha", "tipo", "activo", "monto_usd", "etiqueta"]].copy()
+    edit_df["fecha"] = pd.to_datetime(edit_df["fecha"]).dt.date
+
+    edited = st.data_editor(
+        edit_df, num_rows="dynamic", use_container_width=True, height=420,
+        key="tx_editor",
+        column_config={
+            "fecha": st.column_config.DateColumn("Fecha", required=True),
+            "tipo": st.column_config.SelectboxColumn(
+                "Tipo", options=["Compra", "Venta", "Dividendo", "Ganancia", "Compensación"],
+                required=True,
+            ),
+            "activo": st.column_config.TextColumn("Activo", required=True),
+            "monto_usd": st.column_config.NumberColumn("Monto (USD)", format="%.2f", required=True),
+            "etiqueta": st.column_config.TextColumn("Etiqueta"),
+        },
+    )
+
+    csave, cdl, _ = st.columns([1, 1, 3])
+    if csave.button("💾 Guardar cambios", type="primary"):
+        edited2 = edited.copy()
+        edited2["fecha"] = pd.to_datetime(edited2["fecha"])
+        edited2["etiqueta"] = edited2["etiqueta"].fillna("").astype(str)
+        ok, msg = save_transactions(
+            edited2, gh_secrets=gh,
+            message="Edit transactions via dashboard",
+        )
+        if ok:
+            st.success(f"✅ {msg}")
+            st.cache_data.clear()
+            st.rerun()
+        else:
+            st.error(f"❌ {msg}")
+
+    # Descarga de respaldo del Excel actual
+    from src.storage import df_to_excel_bytes
+    cdl.download_button(
+        "⬇️ Descargar Excel",
+        data=df_to_excel_bytes(tx),
+        file_name=TX_PATH.name,
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+    if not gh:
+        with st.expander("🔧 Configurar sync con GitHub (instrucciones)"):
+            st.markdown("""
+**Para que los cambios desde la app desplegada persistan**, necesitas un Personal Access Token de GitHub
+con permiso de escritura en este repo.
+
+1. Ve a [github.com/settings/personal-access-tokens/new](https://github.com/settings/personal-access-tokens/new)
+2. Crea un **fine-grained token**:
+   - **Repository access:** Only select repositories → elegir `Portafolio-Manager`
+   - **Repository permissions:** `Contents` → **Read and write**
+   - Expiration: 90 días o más
+3. Copia el token (`github_pat_...`).
+4. En tu app de Streamlit Cloud → ⋮ Manage app → **Settings → Secrets**, pega:
+   ```toml
+   [github]
+   token = "github_pat_xxxxx"
+   repo = "luisnavarrof/Portafolio-Manager"
+   branch = "main"
+   file_path = "data/transactions.xlsx"
+   ```
+5. Guarda. La app se redesplegará automáticamente con sync activo.
+            """)
+
+
 st.markdown(
     "<div style='text-align:center; opacity:0.5; font-size:0.78rem; margin-top:1.2rem;'>"
     "Precios: yfinance · FX: mindicador.cl (BCCh) · "
-    "Editar transacciones manualmente en <code>data/transactions.xlsx</code>"
+    f"Auto-refresh: {st.session_state.live_interval}s"
     "</div>",
     unsafe_allow_html=True,
 )

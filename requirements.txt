@@ -7,3 +7,4 @@ plotly>=5.22
 requests>=2.32
 pyarrow>=15.0
 python-dateutil>=2.9
+streamlit-autorefresh>=1.0.1
