@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.env
+
+# IDE / herramientas locales
+.vscode/
+.idea/
+.claude/
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Caches generados (se reconstruyen solos al correr la app)
+data/prices_cache.parquet
+data/fx_cache.parquet
+data/logos_cache.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Archivo original de Fintual en la raíz (no se usa, source of truth es data/transactions.xlsx)
+/Historial de Transacciones Fintual V2.xlsx
