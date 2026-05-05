@@ -261,11 +261,13 @@ k6.metric("P&L total", f"US$ {total_pnl:+,.2f}")
 _sh_daily = daily_holdings(tx, prices)
 mv_series = portfolio_value_series(_sh_daily, prices)
 
-# TWR acumulado desde inicio (elimina el efecto de aportes de capital)
-_flows_twr = cf.set_index("date")["flow"].resample("D").sum().reindex(mv_series.index).fillna(0)
-_twr_base = _compute_twr(mv_series, _flows_twr)
-# Extender con el retorno live de hoy (sin ajuste de flujo: asumimos depósitos del día
-# ya están reflejados en el close de ayer o se ignoraron hoy)
+# TWR acumulado desde inicio (elimina el efecto de aportes de capital).
+# Solo desde el primer día con NAV > 0; antes no hay posiciones reales.
+_first_active_idx = mv_series[mv_series > 1e-6].index
+_mv_for_twr = mv_series.loc[_first_active_idx[0]:] if len(_first_active_idx) else mv_series
+_flows_twr = cf.set_index("date")["flow"].resample("D").sum().reindex(_mv_for_twr.index).fillna(0)
+_twr_base = _compute_twr(_mv_for_twr, _flows_twr)
+# Extender con el retorno live de hoy
 _yesterday_nav = float(mv_series.iloc[-1]) if not mv_series.empty else 0.0
 if _yesterday_nav > 0 and total_mv_usd > 0:
     _today_ts = pd.Timestamp.today().normalize()
@@ -303,9 +305,10 @@ def _period_return(
         return None
     twr_start = float(twr.loc[avail[-1]])
     twr_end = float(twr.iloc[-1])
-    if abs(1 + twr_start) < 1e-9:
+    denom = 1 + twr_start
+    if abs(denom) < 1e-9:
         return None
-    return (1 + twr_end) / (1 + twr_start) - 1
+    return (1 + twr_end) / denom - 1
 
 
 # ──────────────── Tabs ────────────────
