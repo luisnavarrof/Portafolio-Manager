@@ -123,6 +123,7 @@ El usuario otorga **permiso absoluto** para modificar tanto el PC como el reposi
 - **Color en métricas de período** (Overview): las tarjetas 1D/1W/1M/etc. ahora muestran delta verde/rojo.
 - **Git credential**: `git config credential.https://github.com.username luisnavarrof` para evitar prompt de selección de cuenta.
 - **Permisos Claude Code**: `defaultMode: bypassPermissions` en `.claude/settings.local.json`.
+- **Fix UX form Gestionar**: al seleccionar "Compra/Venta de dólares", el selectbox Activo muestra automáticamente "Dólares" (index dinámico). Antes mostraba el ticker previo aunque deshabilitado.
 
 ## Estilo del usuario
 
