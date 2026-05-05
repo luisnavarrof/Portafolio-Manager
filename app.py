@@ -257,6 +257,40 @@ k5.metric("Dividendos", f"US$ {divs_total:,.2f}")
 k6.metric("P&L total", f"US$ {total_pnl:+,.2f}")
 
 
+# ──────────────── NAV histórico (compartido entre Overview e Histórico) ────────────────
+_sh_daily = daily_holdings(tx, prices)
+mv_series = portfolio_value_series(_sh_daily, prices)
+
+
+def _period_return(
+    mv: pd.Series,
+    nav_today: float,
+    offset_days: int | None = None,
+    offset_bdays: int | None = None,
+    ytd: bool = False,
+) -> tuple[float, float] | None:
+    """Retorna (pct, usd_diff) para el período dado, o None si no hay datos suficientes."""
+    if mv is None or mv.empty:
+        return None
+    today = pd.Timestamp.today().normalize()
+    if ytd:
+        start_date = pd.Timestamp(today.year, 1, 1)
+    elif offset_bdays:
+        start_date = today - pd.offsets.BDay(offset_bdays)
+    elif offset_days:
+        start_date = today - pd.Timedelta(days=offset_days)
+    else:
+        return None
+    avail = mv.index[mv.index <= start_date]
+    if avail.empty:
+        return None
+    start_val = float(mv.loc[avail[-1]])
+    if start_val <= 0:
+        return None
+    ret_usd = nav_today - start_val
+    return (ret_usd / start_val * 100, ret_usd)
+
+
 # ──────────────── Tabs ────────────────
 tab_overview, tab_positions, tab_history, tab_benchmark, tab_closed, tab_manage = st.tabs(
     ["Overview", "Posiciones", "Histórico", "vs VOO", "Cerradas", "⚙️ Gestionar"]
@@ -349,6 +383,27 @@ with tab_overview:
                 },
             )
 
+        # ── Rendimiento por período ──
+        st.markdown("---")
+        st.markdown("**Rendimiento del portafolio por período**")
+        _perf_periods = [
+            ("1D",  dict(offset_days=1)),
+            ("1W",  dict(offset_bdays=5)),
+            ("1M",  dict(offset_bdays=21)),
+            ("3M",  dict(offset_bdays=63)),
+            ("6M",  dict(offset_bdays=126)),
+            ("YTD", dict(ytd=True)),
+            ("1Y",  dict(offset_bdays=252)),
+        ]
+        pcols = st.columns(len(_perf_periods))
+        for _col, (_label, _kwargs) in zip(pcols, _perf_periods):
+            _res = _period_return(mv_series, total_mv_usd, **_kwargs)
+            if _res is None:
+                _col.metric(_label, "N/D")
+            else:
+                _ret_pct, _ret_usd = _res
+                _col.metric(_label, f"{_ret_pct:+.2f}%", f"US$ {_ret_usd:+,.0f}")
+
 
 # ─── Posiciones ───
 with tab_positions:
@@ -382,9 +437,8 @@ with tab_positions:
 
 # ─── Histórico ───
 with tab_history:
-    with st.spinner("Calculando holdings diarios…"):
-        sh = daily_holdings(tx, prices)
-        mv = portfolio_value_series(sh, prices)
+    sh = _sh_daily
+    mv = mv_series
 
     if mv.empty:
         st.info("No hay datos suficientes.")
@@ -458,8 +512,7 @@ with tab_history:
 # ─── Benchmark vs VOO ───
 with tab_benchmark:
     with st.spinner("Construyendo escenario VOO…"):
-        sh2 = daily_holdings(tx, prices)
-        mv_port = portfolio_value_series(sh2, prices)
+        mv_port = mv_series
         mv_voo = benchmark_voo(tx, prices)
 
     if mv_port.empty or mv_voo.empty:
@@ -562,38 +615,61 @@ with tab_manage:
         )
 
     st.markdown("### ➕ Agregar transacción")
+    _TIPOS_FORM = [
+        "Compra", "Venta", "Dividendo", "Ganancia", "Compensación",
+        "Compra de dólares", "Venta de dólares",
+    ]
+    _CASH_TIPOS = {"Compra de dólares", "Venta de dólares"}
     with st.form("add_tx_form", clear_on_submit=True):
         c1, c2, c3, c4 = st.columns([1, 1, 1, 1])
         f_fecha = c1.date_input("Fecha", value=date.today())
-        f_tipo = c2.selectbox("Tipo", ["Compra", "Venta", "Dividendo", "Ganancia", "Compensación"])
+        f_tipo = c2.selectbox(
+            "Tipo", _TIPOS_FORM,
+            help="'Compra/Venta de dólares': registra un depósito o retiro de capital al bróker. El activo se fija automáticamente a 'Dólares'.",
+        )
         existing_assets = sorted(set(tx["activo"].unique().tolist() + [CASH_ASSET]))
-        f_activo_pick = c3.selectbox("Activo", existing_assets + ["⊕ Nuevo ticker…"])
+        f_activo_pick = c3.selectbox(
+            "Activo", existing_assets + ["⊕ Nuevo ticker…"],
+            disabled=(f_tipo in _CASH_TIPOS),
+            help="Ignorado si el tipo es 'Compra/Venta de dólares'.",
+        )
         f_activo_new = c3.text_input("Nuevo ticker", placeholder="ej. AAPL",
                                       label_visibility="collapsed",
-                                      disabled=(f_activo_pick != "⊕ Nuevo ticker…"))
+                                      disabled=(f_activo_pick != "⊕ Nuevo ticker…") or (f_tipo in _CASH_TIPOS))
         f_monto = c4.number_input("Monto (USD)", min_value=0.0, step=0.01, format="%.2f")
         c5, c6 = st.columns([1, 3])
         f_cierre = c5.checkbox("Cierre de posición", value=False,
-                                help="Marca esta venta como cierre completo de la posición.")
+                                help="Marca esta venta como cierre completo de la posición.",
+                                disabled=(f_tipo in _CASH_TIPOS))
         f_etiqueta = c6.text_input("Etiqueta (opcional)",
-                                    value="Cierre de posición" if False else "")
+                                    value="Cierre de posición" if False else "",
+                                    disabled=(f_tipo in _CASH_TIPOS))
         submitted = st.form_submit_button("Guardar transacción", type="primary")
 
         if submitted:
-            activo = f_activo_new.strip().upper() if f_activo_pick == "⊕ Nuevo ticker…" else f_activo_pick
+            if f_tipo in _CASH_TIPOS:
+                tipo_real = "Compra" if f_tipo == "Compra de dólares" else "Venta"
+                activo = CASH_ASSET
+                etiqueta = ""
+                is_close = False
+            else:
+                tipo_real = f_tipo
+                activo = f_activo_new.strip().upper() if f_activo_pick == "⊕ Nuevo ticker…" else f_activo_pick
+                etiqueta = "Cierre de posición" if f_cierre else (f_etiqueta or "")
+                is_close = bool(f_cierre or "Cierre" in etiqueta)
+
             if not activo:
                 st.error("Activo vacío.")
             elif f_monto <= 0:
                 st.error("Monto debe ser > 0.")
             else:
-                etiqueta = "Cierre de posición" if f_cierre else (f_etiqueta or "")
                 new_row = pd.DataFrame([{
                     "fecha": pd.Timestamp(f_fecha),
-                    "tipo": f_tipo,
+                    "tipo": tipo_real,
                     "activo": activo,
                     "monto_usd": float(f_monto),
                     "etiqueta": etiqueta,
-                    "is_close": bool(f_cierre or "Cierre" in etiqueta),
+                    "is_close": is_close,
                 }])
                 tx_new = pd.concat([tx, new_row], ignore_index=True)
                 tx_new = tx_new.sort_values(["fecha", "tipo"], kind="stable").reset_index(drop=True)
@@ -621,8 +697,10 @@ with tab_manage:
         column_config={
             "fecha": st.column_config.DateColumn("Fecha", required=True),
             "tipo": st.column_config.SelectboxColumn(
-                "Tipo", options=["Compra", "Venta", "Dividendo", "Ganancia", "Compensación"],
+                "Tipo",
+                options=["Compra", "Venta", "Dividendo", "Ganancia", "Compensación"],
                 required=True,
+                help="Para depósitos/retiros de capital usa activo='Dólares' con tipo Compra/Venta.",
             ),
             "activo": st.column_config.TextColumn("Activo", required=True),
             "monto_usd": st.column_config.NumberColumn("Monto (USD)", format="%.2f", required=True),
