@@ -647,8 +647,11 @@ with tab_manage:
             help="'Compra/Venta de dólares': registra un depósito o retiro de capital al bróker. El activo se fija automáticamente a 'Dólares'.",
         )
         existing_assets = sorted(set(tx["activo"].unique().tolist() + [CASH_ASSET]))
+        _activo_opts = existing_assets + ["⊕ Nuevo ticker…"]
+        _activo_idx = _activo_opts.index(CASH_ASSET) if f_tipo in _CASH_TIPOS else 0
         f_activo_pick = c3.selectbox(
-            "Activo", existing_assets + ["⊕ Nuevo ticker…"],
+            "Activo", _activo_opts,
+            index=_activo_idx,
             disabled=(f_tipo in _CASH_TIPOS),
             help="Ignorado si el tipo es 'Compra/Venta de dólares'.",
         )
