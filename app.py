@@ -17,7 +17,7 @@ from src.portfolio import (
     build_states, closed_positions,
     daily_holdings, portfolio_value_series,
 )
-from src.analytics import cash_flows, benchmark_voo, drawdown, per_ticker_summary
+from src.analytics import cash_flows, benchmark_voo, drawdown, per_ticker_summary, twr as _compute_twr
 from src.logos import logo_urls
 from src.storage import save_transactions
 
@@ -261,16 +261,33 @@ k6.metric("P&L total", f"US$ {total_pnl:+,.2f}")
 _sh_daily = daily_holdings(tx, prices)
 mv_series = portfolio_value_series(_sh_daily, prices)
 
+# TWR acumulado desde inicio (elimina el efecto de aportes de capital)
+_flows_twr = cf.set_index("date")["flow"].resample("D").sum().reindex(mv_series.index).fillna(0)
+_twr_base = _compute_twr(mv_series, _flows_twr)
+# Extender con el retorno live de hoy (sin ajuste de flujo: asumimos depósitos del día
+# ya están reflejados en el close de ayer o se ignoraron hoy)
+_yesterday_nav = float(mv_series.iloc[-1]) if not mv_series.empty else 0.0
+if _yesterday_nav > 0 and total_mv_usd > 0:
+    _today_ts = pd.Timestamp.today().normalize()
+    _today_r = total_mv_usd / _yesterday_nav - 1
+    _twr_today_val = (1 + float(_twr_base.iloc[-1])) * (1 + _today_r) - 1
+    if _today_ts not in _twr_base.index:
+        twr_series = pd.concat([_twr_base, pd.Series([_twr_today_val], index=[_today_ts])])
+    else:
+        twr_series = _twr_base.copy()
+        twr_series.loc[_today_ts] = _twr_today_val
+else:
+    twr_series = _twr_base
+
 
 def _period_return(
-    mv: pd.Series,
-    nav_today: float,
+    twr: pd.Series,
     offset_days: int | None = None,
     offset_bdays: int | None = None,
     ytd: bool = False,
-) -> tuple[float, float] | None:
-    """Retorna (pct, usd_diff) para el período dado, o None si no hay datos suficientes."""
-    if mv is None or mv.empty:
+) -> float | None:
+    """TWR sub-period: (1+twr_end)/(1+twr_start)-1. Aísla rendimiento de los aportes."""
+    if twr is None or twr.empty:
         return None
     today = pd.Timestamp.today().normalize()
     if ytd:
@@ -281,14 +298,12 @@ def _period_return(
         start_date = today - pd.Timedelta(days=offset_days)
     else:
         return None
-    avail = mv.index[mv.index <= start_date]
+    avail = twr.index[twr.index <= start_date]
     if avail.empty:
         return None
-    start_val = float(mv.loc[avail[-1]])
-    if start_val <= 0:
-        return None
-    ret_usd = nav_today - start_val
-    return (ret_usd / start_val * 100, ret_usd)
+    twr_start = float(twr.loc[avail[-1]])
+    twr_end = float(twr.iloc[-1])
+    return (1 + twr_end) / (1 + twr_start) - 1
 
 
 # ──────────────── Tabs ────────────────
@@ -397,12 +412,11 @@ with tab_overview:
         ]
         pcols = st.columns(len(_perf_periods))
         for _col, (_label, _kwargs) in zip(pcols, _perf_periods):
-            _res = _period_return(mv_series, total_mv_usd, **_kwargs)
-            if _res is None:
+            _ret = _period_return(twr_series, **_kwargs)
+            if _ret is None:
                 _col.metric(_label, "N/D")
             else:
-                _ret_pct, _ret_usd = _res
-                _col.metric(_label, f"{_ret_pct:+.2f}%", f"US$ {_ret_usd:+,.0f}")
+                _col.metric(_label, f"{_ret*100:+.2f}%")
 
 
 # ─── Posiciones ───
@@ -577,11 +591,11 @@ with tab_closed:
 
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Mejor trade (USD)", best_usd["ticker"],
-                  f"$ {best_usd['realized_pnl']:+,.2f} · {best_usd['realized_pnl_pct']:+.1f}%")
+                  f"{best_usd['realized_pnl']:+,.2f} USD · {best_usd['realized_pnl_pct']:+.1f}%")
         c2.metric("Mejor trade (%)", best_pct["ticker"],
-                  f"$ {best_pct['realized_pnl']:+,.2f} · {best_pct['realized_pnl_pct']:+.1f}%")
+                  f"{best_pct['realized_pnl']:+,.2f} USD · {best_pct['realized_pnl_pct']:+.1f}%")
         c3.metric("Peor trade (USD)", worst_usd["ticker"],
-                  f"$ {worst_usd['realized_pnl']:+,.2f} · {worst_usd['realized_pnl_pct']:+.1f}%")
+                  f"{worst_usd['realized_pnl']:+,.2f} USD · {worst_usd['realized_pnl_pct']:+.1f}%")
         c4.metric("# posiciones cerradas", f"{len(cp)}")
 
         df_cp = _with_logo(cp, logos)
