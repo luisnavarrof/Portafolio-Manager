@@ -303,6 +303,8 @@ def _period_return(
         return None
     twr_start = float(twr.loc[avail[-1]])
     twr_end = float(twr.iloc[-1])
+    if abs(1 + twr_start) < 1e-9:
+        return None
     return (1 + twr_end) / (1 + twr_start) - 1
 
 
@@ -416,7 +418,7 @@ with tab_overview:
             if _ret is None:
                 _col.metric(_label, "N/D")
             else:
-                _col.metric(_label, f"{_ret*100:+.2f}%")
+                _col.metric(_label, f"{_ret*100:+.2f}%", delta=f"{_ret*100:+.2f}%")
 
 
 # ─── Posiciones ───
