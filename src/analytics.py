@@ -55,6 +55,7 @@ def twr(value_series: pd.Series, flows: pd.Series) -> pd.Series:
     flows: serie alineada con value_series; positivo=aporte, negativo=retiro.
     """
     v = value_series.dropna()
+    v = v[v > 0]  # skip days with zero NAV (missing prices / portfolio not yet started)
     f = flows.reindex(v.index).fillna(0.0)
     rets = []
     prev = None
