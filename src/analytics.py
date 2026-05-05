@@ -63,7 +63,11 @@ def twr(value_series: pd.Series, flows: pd.Series) -> pd.Series:
             rets.append(0.0)
         else:
             denom = prev_val + f.iloc[i]
-            r = (val - denom) / denom if denom > 0 else 0.0
+            if denom > 0 and val > 0:
+                r = (val - denom) / denom
+            else:
+                # NAV=0 significa precios no disponibles ese día, no pérdida real
+                r = 0.0
             rets.append(r)
         prev = d
         prev_val = val
