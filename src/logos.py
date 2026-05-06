@@ -22,7 +22,7 @@ _CLEARBIT_DOMAINS: dict[str, str] = {
     "NOW": "servicenow.com", "VST": "vistracorp.com", "UHS": "uhsinc.com",
     "KTOS": "kratosdefense.com", "GRAB": "grab.com", "ARDX": "ardelyx.com",
     "OKLO": "oklo.com", "NNE": "nanonuclearenergy.com", "QXO": "qxo.com",
-    "NBIS": "nebius.com", "AU": "anglogoldashanti.com", "XAR": "ssga.com",
+    "NBIS": "nebius.com", "AU": "anglogoldashanti.com", "XAR": "ssga.com", "NOK": "nokia.com",
     "VOO": "vanguard.com", "QQQ": "invesco.com", "GLD": "spdrgoldshares.com",
     "ASML": "asml.com", "LLY": "lilly.com", "JPM": "jpmorganchase.com",
     "IBM": "ibm.com", "MU": "micron.com", "DUOL": "duolingo.com",
@@ -68,6 +68,14 @@ def logo_url(ticker: str) -> str:
     cache[ticker] = ""
     _save_cache(cache)
     return ""
+
+
+def invalidate(ticker: str) -> None:
+    """Elimina un ticker del cache JSON para forzar re-fetch en el siguiente render."""
+    cache = _load_cache()
+    if ticker in cache:
+        del cache[ticker]
+        _save_cache(cache)
 
 
 def logo_urls(tickers: list[str]) -> dict[str, str]:

@@ -18,8 +18,9 @@ from src.portfolio import (
     daily_holdings, portfolio_value_series,
 )
 from src.analytics import cash_flows, benchmark_voo, drawdown, per_ticker_summary, twr as _compute_twr
-from src.logos import logo_urls
+from src.logos import logo_urls, invalidate as invalidate_logo
 from src.storage import save_transactions
+from src.info import search_tickers, fetch_stock_info
 
 try:
     from streamlit_autorefresh import st_autorefresh
@@ -154,6 +155,16 @@ def _logos(tickers):
 def _live(tickers, _bucket):
     """Cotizaciones intradía. `_bucket` invalida la cache cada N segundos."""
     return live_quotes(list(tickers))
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _search(query):
+    return search_tickers(query)
+
+
+@st.cache_data(ttl=86400, show_spinner="Cargando info de empresas…")
+def _stock_info(tickers):
+    return fetch_stock_info(list(tickers))
 
 
 def _gh_secrets() -> dict | None:
@@ -312,8 +323,8 @@ def _period_return(
 
 
 # ──────────────── Tabs ────────────────
-tab_overview, tab_positions, tab_history, tab_benchmark, tab_closed, tab_manage = st.tabs(
-    ["Overview", "Posiciones", "Histórico", "vs VOO", "Cerradas", "⚙️ Gestionar"]
+tab_overview, tab_analysis, tab_positions, tab_history, tab_benchmark, tab_closed, tab_manage = st.tabs(
+    ["Overview", "Análisis", "Posiciones", "Histórico", "vs VOO", "Cerradas", "⚙️ Gestionar"]
 )
 
 
@@ -422,6 +433,135 @@ with tab_overview:
                 _col.metric(_label, "N/D")
             else:
                 _col.metric(_label, f"{_ret*100:+.2f}%", delta=f"{_ret*100:+.2f}%")
+
+
+# ─── Análisis General ───
+with tab_analysis:
+    if not open_tickers:
+        st.info("Sin posiciones abiertas para analizar.")
+    else:
+        _analysis_tickers = [t for t in open_tickers if t != "VOO"]
+        with st.spinner("Cargando datos de empresas..."):
+            stock_info = _stock_info(tuple(sorted(_analysis_tickers)))
+
+        # --- Diversificación por sector ---
+        st.markdown("### Diversificación por sector")
+        sector_weights: dict[str, float] = {}
+        for t in _analysis_tickers:
+            if t in ph.index:
+                mv = float(ph.loc[t, "market_value_usd"])
+                sec = stock_info.get(t, {}).get("sector", "Sin datos")
+                sector_weights[sec] = sector_weights.get(sec, 0) + mv
+
+        if sector_weights:
+            col_spie, col_sbar = st.columns([1, 1])
+            with col_spie:
+                fig_sec = go.Figure(go.Pie(
+                    labels=list(sector_weights.keys()),
+                    values=list(sector_weights.values()),
+                    hole=0.5,
+                    hovertemplate="<b>%{label}</b><br>US$ %{value:,.2f} · %{percent}<extra></extra>",
+                    textinfo="label+percent",
+                    textposition="outside",
+                    marker=dict(line=dict(color="rgba(0,0,0,0)", width=0)),
+                ))
+                _sec_total = sum(sector_weights.values())
+                fig_sec.add_annotation(
+                    text=f"<b>{len(sector_weights)}</b><br><span style='font-size:11px;opacity:0.7'>sectores</span>",
+                    showarrow=False, font=dict(size=16, color="#e6edf3"),
+                    x=0.5, y=0.5, xanchor="center", yanchor="middle",
+                )
+                fig_sec.update_layout(
+                    height=420,
+                    showlegend=False,
+                    margin=dict(l=10, r=10, t=10, b=10),
+                    plot_bgcolor="rgba(0,0,0,0)",
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    font=dict(color="#e6edf3"),
+                )
+                st.plotly_chart(fig_sec, use_container_width=True, config={"displayModeBar": False})
+
+            with col_sbar:
+                # Tabla detallada por sector
+                sec_rows = []
+                for sec, mv in sorted(sector_weights.items(), key=lambda x: -x[1]):
+                    tickers_in = [t for t in _analysis_tickers
+                                  if stock_info.get(t, {}).get("sector") == sec and t in ph.index]
+                    pct = mv / _sec_total * 100 if _sec_total else 0
+                    sec_rows.append({
+                        "Sector": sec,
+                        "Valor (USD)": mv,
+                        "Peso (%)": pct,
+                        "Tickers": ", ".join(tickers_in),
+                    })
+                sec_df = pd.DataFrame(sec_rows)
+                st.dataframe(
+                    sec_df, hide_index=True, use_container_width=True, height=400,
+                    column_config={
+                        "Valor (USD)": st.column_config.NumberColumn(format="$ %,.2f"),
+                        "Peso (%)": st.column_config.NumberColumn(format="%.1f%%"),
+                    },
+                )
+
+        # --- Diversificación por industria ---
+        st.markdown("### Diversificación por industria")
+        industry_weights: dict[str, float] = {}
+        for t in _analysis_tickers:
+            if t in ph.index:
+                mv = float(ph.loc[t, "market_value_usd"])
+                ind = stock_info.get(t, {}).get("industry", "Sin datos")
+                industry_weights[ind] = industry_weights.get(ind, 0) + mv
+
+        if industry_weights:
+            ind_sorted = sorted(industry_weights.items(), key=lambda x: -x[1])
+            ind_df = pd.DataFrame([
+                {"Industria": k, "Valor (USD)": v,
+                 "Peso (%)": v / sum(industry_weights.values()) * 100}
+                for k, v in ind_sorted
+            ])
+            fig_ind = px.bar(
+                ind_df, x="Peso (%)", y="Industria", orientation="h",
+                text="Peso (%)", color="Valor (USD)",
+                color_continuous_scale="Viridis",
+            )
+            fig_ind.update_traces(texttemplate="%{text:.1f}%", textposition="outside")
+            fig_ind.update_layout(
+                height=max(300, len(ind_df) * 28 + 60),
+                yaxis=dict(autorange="reversed"),
+                showlegend=False, coloraxis_showscale=False,
+                margin=dict(l=10, r=60, t=10, b=10),
+                plot_bgcolor="rgba(0,0,0,0)",
+                paper_bgcolor="rgba(0,0,0,0)",
+                font=dict(color="#e6edf3"),
+            )
+            st.plotly_chart(fig_ind, use_container_width=True, config={"displayModeBar": False})
+
+        # --- Perfil de cada acción (ordenado por peso) ---
+        st.markdown("### Perfil de posiciones")
+        st.caption("Ordenado por peso en portafolio (mayor a menor)")
+
+        ph_open = ph.loc[ph.index.isin(_analysis_tickers)].sort_values("market_value_usd", ascending=False)
+        for ticker in ph_open.index:
+            si = stock_info.get(ticker, {})
+            mv_usd = float(ph_open.loc[ticker, "market_value_usd"])
+            weight_pct = mv_usd / total_mv_usd * 100 if total_mv_usd else 0
+            logo = logos.get(ticker, "")
+
+            with st.container():
+                hcol1, hcol2 = st.columns([0.07, 0.93])
+                if logo:
+                    hcol1.image(logo, width=40)
+                with hcol2:
+                    st.markdown(
+                        f"**{ticker}** — {si.get('name', ticker)}  \n"
+                        f"`{si.get('sector', 'N/A')}` · `{si.get('industry', 'N/A')}`"
+                        f" · Peso: **{weight_pct:.1f}%** · MV: US$ {mv_usd:,.2f}"
+                    )
+                desc = si.get("description", "")
+                if desc:
+                    with st.expander("Ver descripción", expanded=False):
+                        st.write(desc)
+                st.markdown("---")
 
 
 # ─── Posiciones ───
@@ -640,24 +780,42 @@ with tab_manage:
     ]
     _CASH_TIPOS = {"Compra de dólares", "Venta de dólares"}
 
-    # Contador generacional: incrementar después de guardar resetea todos los widgets
     if "add_tx_gen" not in st.session_state:
         st.session_state.add_tx_gen = 0
     _g = st.session_state.add_tx_gen
 
-    c1, c2, c3, c4 = st.columns([1, 1, 1, 1])
+    c1, c2, c3, c4 = st.columns([1, 1, 1.3, 0.7])
     f_fecha = c1.date_input("Fecha", value=date.today(), key=f"tx_fecha_{_g}")
     f_tipo  = c2.selectbox("Tipo", _TIPOS_FORM, key=f"tx_tipo_{_g}",
                            help="'Compra/Venta de dólares' fija el activo a 'Dólares' automáticamente.")
     _is_cash = f_tipo in _CASH_TIPOS
+
     if _is_cash:
         c3.text_input("Activo", value="Dólares", disabled=True, key=f"tx_activo_disp_{_g}")
         f_activo = CASH_ASSET
     else:
-        f_activo = c3.text_input("Activo (ticker)", placeholder="ej. NVDA",
-                                  key=f"tx_activo_{_g}").strip().upper()
+        _search_q = c3.text_input(
+            "Buscar ticker o empresa", placeholder="ej. NVDA, Nokia, Apple...",
+            key=f"tx_search_{_g}",
+            help="Escribe un ticker o nombre y presiona Enter para buscar.",
+        )
+        f_activo = ""
+        if _search_q and len(_search_q) >= 1:
+            _results = _search(_search_q.strip())
+            if _results:
+                _opts = [f"{r['symbol']}  —  {r['name']}  ({r['exchange']})" for r in _results]
+                _sel = c3.selectbox(
+                    "Resultado:", _opts, key=f"tx_result_{_g}",
+                    label_visibility="collapsed",
+                )
+                f_activo = _sel.split("  —")[0].strip()
+            else:
+                f_activo = _search_q.strip().upper()
+                c3.caption(f"Sin resultados en Yahoo. Se usará: **{f_activo}**")
+
     f_monto = c4.number_input("Monto (USD)", min_value=0.0, step=0.01, format="%.2f",
                                key=f"tx_monto_{_g}")
+
     c5, c6 = st.columns([1, 3])
     if not _is_cash:
         f_cierre   = c5.checkbox("Cierre de posición", key=f"tx_cierre_{_g}",
@@ -674,34 +832,46 @@ with tab_manage:
         is_close  = bool(f_cierre or "Cierre" in etiqueta)
 
         if not f_activo:
-            st.error("Activo vacío.")
+            st.error("Activo vacío. Escribe un ticker o nombre de empresa.")
         elif f_monto <= 0:
             st.error("Monto debe ser > 0.")
         else:
-            new_row = pd.DataFrame([{
-                "fecha": pd.Timestamp(f_fecha),
-                "tipo": tipo_real,
-                "activo": f_activo,
-                "monto_usd": float(f_monto),
-                "etiqueta": etiqueta,
-                "is_close": is_close,
-            }])
-            tx_new = pd.concat([tx, new_row], ignore_index=True)
-            tx_new = tx_new.sort_values(["fecha", "tipo"], kind="stable").reset_index(drop=True)
-            ok, msg = save_transactions(
-                tx_new, gh_secrets=gh,
-                message=f"Add tx: {f_tipo} {f_activo} ${f_monto:.2f} ({f_fecha})",
-            )
-            if ok:
-                if msg.startswith("⚠️"):
-                    st.warning(msg)
+            try:
+                new_row = pd.DataFrame([{
+                    "fecha": pd.Timestamp(f_fecha),
+                    "tipo": tipo_real,
+                    "activo": f_activo,
+                    "monto_usd": float(f_monto),
+                    "etiqueta": etiqueta,
+                    "is_close": is_close,
+                }])
+                tx_new = pd.concat([tx, new_row], ignore_index=True)
+                tx_new = tx_new.sort_values(["fecha", "tipo"], kind="stable").reset_index(drop=True)
+                ok, msg = save_transactions(
+                    tx_new, gh_secrets=gh,
+                    message=f"Add tx: {f_tipo} {f_activo} ${f_monto:.2f} ({f_fecha})",
+                )
+                if ok:
+                    if f_activo != CASH_ASSET:
+                        invalidate_logo(f_activo)
+                    st.session_state.add_tx_gen += 1
+                    st.cache_data.clear()
+                    if msg.startswith("⚠️"):
+                        st.session_state["_tx_msg"] = ("warning", msg)
+                    else:
+                        st.session_state["_tx_msg"] = ("success", f"✅ {msg}")
+                    st.rerun()
                 else:
-                    st.success(f"✅ {msg}")
-                st.session_state.add_tx_gen += 1
-                st.cache_data.clear()
-                st.rerun()
-            else:
-                st.error(f"❌ {msg}")
+                    st.error(f"❌ {msg}")
+            except Exception as ex:
+                st.error(f"❌ Error al guardar: {ex}")
+
+    if "_tx_msg" in st.session_state:
+        _msg_type, _msg_text = st.session_state.pop("_tx_msg")
+        if _msg_type == "warning":
+            st.warning(_msg_text)
+        else:
+            st.success(_msg_text)
 
     st.divider()
     st.markdown("### ✏️ Editar / eliminar transacciones existentes")
