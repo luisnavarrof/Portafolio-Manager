@@ -92,6 +92,8 @@ def save_transactions(tx: pd.DataFrame, *, gh_secrets: dict | None = None,
         )
         return True, "Guardado y sincronizado a GitHub. La app se redesplegará en ~30s."
     except requests.HTTPError as ex:
-        return False, f"Guardado local OK, pero falló commit a GitHub: {ex.response.status_code} {ex.response.text[:200]}"
+        status = ex.response.status_code
+        detail = "token expirado — actualiza el secret en Streamlit Cloud" if status == 401 else f"HTTP {status}"
+        return True, f"⚠️ Guardado local OK. Sync GitHub falló: {detail}."
     except Exception as ex:
-        return False, f"Guardado local OK, pero falló commit a GitHub: {ex}"
+        return True, f"⚠️ Guardado local OK. Sync GitHub falló: {ex}"

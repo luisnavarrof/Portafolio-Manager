@@ -639,72 +639,69 @@ with tab_manage:
         "Compra de dólares", "Venta de dólares",
     ]
     _CASH_TIPOS = {"Compra de dólares", "Venta de dólares"}
-    with st.form("add_tx_form", clear_on_submit=True):
-        c1, c2, c3, c4 = st.columns([1, 1, 1, 1])
-        f_fecha = c1.date_input("Fecha", value=date.today())
-        f_tipo = c2.selectbox(
-            "Tipo", _TIPOS_FORM,
-            help="'Compra/Venta de dólares': registra un depósito o retiro de capital al bróker. El activo se fija automáticamente a 'Dólares'.",
-        )
-        existing_assets = sorted(set(tx["activo"].unique().tolist() + [CASH_ASSET]))
-        _activo_opts = existing_assets + ["⊕ Nuevo ticker…"]
-        _activo_idx = _activo_opts.index(CASH_ASSET) if f_tipo in _CASH_TIPOS else 0
-        f_activo_pick = c3.selectbox(
-            "Activo", _activo_opts,
-            index=_activo_idx,
-            disabled=(f_tipo in _CASH_TIPOS),
-            help="Ignorado si el tipo es 'Compra/Venta de dólares'.",
-        )
-        f_activo_new = c3.text_input("Nuevo ticker", placeholder="ej. AAPL",
-                                      label_visibility="collapsed",
-                                      disabled=(f_activo_pick != "⊕ Nuevo ticker…") or (f_tipo in _CASH_TIPOS))
-        f_monto = c4.number_input("Monto (USD)", min_value=0.0, step=0.01, format="%.2f")
-        c5, c6 = st.columns([1, 3])
-        f_cierre = c5.checkbox("Cierre de posición", value=False,
-                                help="Marca esta venta como cierre completo de la posición.",
-                                disabled=(f_tipo in _CASH_TIPOS))
-        f_etiqueta = c6.text_input("Etiqueta (opcional)",
-                                    value="Cierre de posición" if False else "",
-                                    disabled=(f_tipo in _CASH_TIPOS))
-        submitted = st.form_submit_button("Guardar transacción", type="primary")
 
-        if submitted:
-            if f_tipo in _CASH_TIPOS:
-                tipo_real = "Compra" if f_tipo == "Compra de dólares" else "Venta"
-                activo = CASH_ASSET
-                etiqueta = ""
-                is_close = False
-            else:
-                tipo_real = f_tipo
-                activo = f_activo_new.strip().upper() if f_activo_pick == "⊕ Nuevo ticker…" else f_activo_pick
-                etiqueta = "Cierre de posición" if f_cierre else (f_etiqueta or "")
-                is_close = bool(f_cierre or "Cierre" in etiqueta)
+    # Contador generacional: incrementar después de guardar resetea todos los widgets
+    if "add_tx_gen" not in st.session_state:
+        st.session_state.add_tx_gen = 0
+    _g = st.session_state.add_tx_gen
 
-            if not activo:
-                st.error("Activo vacío.")
-            elif f_monto <= 0:
-                st.error("Monto debe ser > 0.")
-            else:
-                new_row = pd.DataFrame([{
-                    "fecha": pd.Timestamp(f_fecha),
-                    "tipo": tipo_real,
-                    "activo": activo,
-                    "monto_usd": float(f_monto),
-                    "etiqueta": etiqueta,
-                    "is_close": is_close,
-                }])
-                tx_new = pd.concat([tx, new_row], ignore_index=True)
-                tx_new = tx_new.sort_values(["fecha", "tipo"], kind="stable").reset_index(drop=True)
-                ok, msg = save_transactions(
-                    tx_new, gh_secrets=gh,
-                    message=f"Add tx: {f_tipo} {activo} ${f_monto:.2f} ({f_fecha})",
-                )
-                if ok:
-                    st.success(f"✅ {msg}")
-                    st.cache_data.clear()
-                    st.rerun()
+    c1, c2, c3, c4 = st.columns([1, 1, 1, 1])
+    f_fecha = c1.date_input("Fecha", value=date.today(), key=f"tx_fecha_{_g}")
+    f_tipo  = c2.selectbox("Tipo", _TIPOS_FORM, key=f"tx_tipo_{_g}",
+                           help="'Compra/Venta de dólares' fija el activo a 'Dólares' automáticamente.")
+    _is_cash = f_tipo in _CASH_TIPOS
+    if _is_cash:
+        c3.text_input("Activo", value="Dólares", disabled=True, key=f"tx_activo_disp_{_g}")
+        f_activo = CASH_ASSET
+    else:
+        f_activo = c3.text_input("Activo (ticker)", placeholder="ej. NVDA",
+                                  key=f"tx_activo_{_g}").strip().upper()
+    f_monto = c4.number_input("Monto (USD)", min_value=0.0, step=0.01, format="%.2f",
+                               key=f"tx_monto_{_g}")
+    c5, c6 = st.columns([1, 3])
+    if not _is_cash:
+        f_cierre   = c5.checkbox("Cierre de posición", key=f"tx_cierre_{_g}",
+                                  help="Marca esta venta como cierre completo de la posición.")
+        f_etiqueta = c6.text_input("Etiqueta (opcional)", key=f"tx_etiqueta_{_g}")
+    else:
+        f_cierre, f_etiqueta = False, ""
+
+    if st.button("Guardar transacción", type="primary", key=f"tx_submit_{_g}"):
+        tipo_real = ("Compra" if f_tipo == "Compra de dólares"
+                     else "Venta" if f_tipo == "Venta de dólares"
+                     else f_tipo)
+        etiqueta  = "Cierre de posición" if f_cierre else (f_etiqueta or "")
+        is_close  = bool(f_cierre or "Cierre" in etiqueta)
+
+        if not f_activo:
+            st.error("Activo vacío.")
+        elif f_monto <= 0:
+            st.error("Monto debe ser > 0.")
+        else:
+            new_row = pd.DataFrame([{
+                "fecha": pd.Timestamp(f_fecha),
+                "tipo": tipo_real,
+                "activo": f_activo,
+                "monto_usd": float(f_monto),
+                "etiqueta": etiqueta,
+                "is_close": is_close,
+            }])
+            tx_new = pd.concat([tx, new_row], ignore_index=True)
+            tx_new = tx_new.sort_values(["fecha", "tipo"], kind="stable").reset_index(drop=True)
+            ok, msg = save_transactions(
+                tx_new, gh_secrets=gh,
+                message=f"Add tx: {f_tipo} {f_activo} ${f_monto:.2f} ({f_fecha})",
+            )
+            if ok:
+                if msg.startswith("⚠️"):
+                    st.warning(msg)
                 else:
-                    st.error(f"❌ {msg}")
+                    st.success(f"✅ {msg}")
+                st.session_state.add_tx_gen += 1
+                st.cache_data.clear()
+                st.rerun()
+            else:
+                st.error(f"❌ {msg}")
 
     st.divider()
     st.markdown("### ✏️ Editar / eliminar transacciones existentes")
@@ -740,7 +737,10 @@ with tab_manage:
             message="Edit transactions via dashboard",
         )
         if ok:
-            st.success(f"✅ {msg}")
+            if msg.startswith("⚠️"):
+                st.warning(msg)
+            else:
+                st.success(f"✅ {msg}")
             st.cache_data.clear()
             st.rerun()
         else:
