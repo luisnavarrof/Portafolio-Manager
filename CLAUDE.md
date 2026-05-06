@@ -124,6 +124,7 @@ El usuario otorga **permiso absoluto** para modificar tanto el PC como el reposi
 - **Git credential**: `git config credential.https://github.com.username luisnavarrof` para evitar prompt de selección de cuenta.
 - **Permisos Claude Code**: `defaultMode: bypassPermissions` en `.claude/settings.local.json`.
 - **Fix UX form Gestionar**: al seleccionar "Compra/Venta de dólares", el selectbox Activo muestra automáticamente "Dólares" (index dinámico). Antes mostraba el ticker previo aunque deshabilitado.
+- **Refactor form Gestionar (2026-05-05)**: eliminado `st.form` (bloqueaba reruns intermedios → cambiar Tipo no actualizaba Activo de inmediato). Reemplazado por widgets sueltos con clave generacional (`add_tx_gen`). Activo cambia a `text_input` libre — el usuario escribe el ticker directamente. Al guardar, `add_tx_gen += 1` resetea todos los widgets. `storage.py`: errores HTTP en GitHub sync ahora retornan `(True, "⚠️ ...")` — dato guardado localmente es lo importante; 401 muestra mensaje de token expirado en lugar de error.
 
 ## Estilo del usuario
 
