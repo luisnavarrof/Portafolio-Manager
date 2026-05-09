@@ -18,6 +18,7 @@ venv/
 data/prices_cache.parquet
 data/fx_cache.parquet
 data/logos_cache.json
+data/holdings.json
 
 # OS
 .DS_Store
