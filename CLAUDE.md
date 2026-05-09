@@ -56,11 +56,9 @@ El Excel `transactions.xlsx` tiene 5 columnas: **Fecha, Tipo, Activo, Monto (USD
 
 El Excel original venía mostrando `D�lares` por mojibake en terminal Windows (cp1252) — pero la string en disco es Unicode correcta `Dólares` (U+00F3). **No "arreglar" el encoding**, ya está bien; el problema es solo de renderizado en la consola. Análogamente con `Compensación` y `Cierre de posición`. **No usar emojis en archivos Python que vayan a `print()` en Windows** (charmap encoder explota); reservados para Streamlit.
 
-## Tickers actualmente activos (snapshot 2026-05-04, 20 posiciones)
+## Holdings actuales
 
-`META, NOW, MSFT, TMO, NVDA, VST, INTU, GRAB, XAR, KTOS, NBIS, UHS, QXO, PANW, PLTR, ARDX, OKLO, NNE, UBER, AU`
-
-Total ≈ US$ 2,816 · aportes netos ≈ US$ 2,613 · variación histórica ≈ US$ 203.
+El archivo `data/holdings.json` se genera automáticamente cada vez que la app recalcula el portafolio. Contiene ticker, shares, market value, cost basis, P&L, etc. Usar ese archivo como fuente rápida del estado actual en lugar de recalcular desde transacciones.
 
 ## Cómo agregar/corregir transacciones
 

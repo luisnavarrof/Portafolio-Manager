@@ -18,6 +18,7 @@ from src.portfolio import (
     daily_holdings, portfolio_value_series,
 )
 from src.analytics import cash_flows, benchmark_voo, drawdown, per_ticker_summary, twr as _compute_twr
+from src.holdings import export_holdings
 from src.logos import logo_urls, invalidate as invalidate_logo
 from src.storage import save_transactions
 from src.info import search_tickers, fetch_stock_info
@@ -207,6 +208,7 @@ if st.session_state.live_enabled and open_tickers:
         st.warning(f"Live quotes no disponibles: {ex}")
 
 ph = per_ticker_summary(states, prices, fx_rate=fx_rate, live=live)
+export_holdings(ph, fx_rate)
 total_mv_usd = ph["market_value_usd"].sum() if not ph.empty else 0
 total_cost_usd = ph["cost_basis_usd"].sum() if not ph.empty else 0
 total_unreal = ph["unrealized_usd"].sum() if not ph.empty else 0
